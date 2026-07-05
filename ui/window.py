@@ -1,242 +1,261 @@
+import time
 import psutil
+from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout,
+                                QHBoxLayout, QLineEdit, QLabel, QSizePolicy)
+from PySide6.QtCore import Qt, QTimer, QThread, Signal, QObject
+from PySide6.QtGui import QFont
 
-from PySide6.QtCore import Qt, QTimer
-
-from PySide6.QtWidgets import (
-    QMainWindow,
-    QWidget,
-    QVBoxLayout,
-    QHBoxLayout,
-    QLineEdit,
-)
-
-from ui.widgets import TopBar, ArcReactorWidget
-from ui.panels import (
-    MonitorPanel,
-    NetworkPanel,
-    LogPanel,
-    ActivityPanel,
-    SuitPanel,
-    VitalSignsPanel,
-)
-
+from ui.theme import (CYAN, CYAN_DIM, CYAN_DARK, BG, BORDER,
+                      WHITE, GREEN, AMBER, APP_STYLE, FONT_MONO)
+from ui.background import BackgroundWidget
+from ui.reactor import ReactorWidget
+from ui.animations import BottomBar
+from ui.terminal import TerminalPanel
+from ui.panels import (SystemsPanel, NetworkPanel, WorldClockPanel,
+                       AIStatusPanel, ToolsPanel, LogPanel)
+from ui.widgets import TopBar
 from core.ai import ask
 from core.tts import speak
+from core.voice import VoiceListener
 
 
-BG = "#050d12"
+# ══════════════════════════════════════════════════════════════
+# AI WORKER  — runs ask() in background thread so UI never freezes
+# ══════════════════════════════════════════════════════════════
+class AIWorker(QObject):
+    finished = Signal(str, int)  # response, latency_ms
+
+    def __init__(self, prompt):
+        super().__init__()
+        self._prompt = prompt
+
+    def run(self):
+        t0       = time.time()
+        response = ask(self._prompt)
+        ms       = int((time.time() - t0) * 1000)
+        self.finished.emit(response, ms)
 
 
+# ══════════════════════════════════════════════════════════════
+# MAIN WINDOW
+# ══════════════════════════════════════════════════════════════
 class MainWindow(QMainWindow):
-
     def __init__(self):
         super().__init__()
-
         self.setWindowTitle("J.A.R.V.I.S.")
-        self.resize(1650, 950)
+        self.resize(1680, 960)
+        self.setStyleSheet(APP_STYLE)
 
-        self.setStyleSheet(f"""
-            QMainWindow {{
-                background: {BG};
-            }}
+        self._msg_count = 0
+        self._ai_thread = None
 
-            QWidget {{
-                background: {BG};
-            }}
-        """)
+        # ── background ───────────────────────────────────────
+        self._bg = BackgroundWidget(self)
+        self._bg.setGeometry(self.rect())
+        self._bg.lower()
 
-        # ----------------------------------------------------
-        # Central Widget
-        # ----------------------------------------------------
-
+        # ── central widget ───────────────────────────────────
         central = QWidget()
+        central.setStyleSheet("background: transparent;")
         self.setCentralWidget(central)
 
         root = QVBoxLayout(central)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        # ----------------------------------------------------
-        # Top Bar
-        # ----------------------------------------------------
-
+        # ── top bar ──────────────────────────────────────────
         self.topbar = TopBar()
         root.addWidget(self.topbar)
 
-        # ----------------------------------------------------
-        # Main HUD
-        # ----------------------------------------------------
-
+        # ── body ─────────────────────────────────────────────
         body = QHBoxLayout()
-        body.setContentsMargins(14, 14, 14, 14)
-        body.setSpacing(14)
+        body.setContentsMargins(12, 12, 12, 8)
+        body.setSpacing(12)
+        root.addLayout(body, 1)
 
-        root.addLayout(body)
-
-        # ====================================================
-        # LEFT COLUMN
-        # ====================================================
-
+        # ── LEFT COLUMN ──────────────────────────────────────
         left = QVBoxLayout()
-        left.setSpacing(12)
+        left.setSpacing(10)
 
-        self.vitals = VitalSignsPanel()
-        self.suit = SuitPanel()
-
-        left.addWidget(self.vitals, 3)
-        left.addWidget(self.suit, 2)
-
-        body.addLayout(left, 2)
-
-        # ====================================================
-        # CENTER
-        # ====================================================
-
-        center = QVBoxLayout()
-        center.setSpacing(12)
-
-        center.addStretch()
-
-        self.arc = ArcReactorWidget()
-        center.addWidget(
-            self.arc,
-            alignment=Qt.AlignCenter
-        )
-
-        center.addStretch()
-
-        self.prompt = QLineEdit()
-
-        self.prompt.setPlaceholderText(
-            "Ask J.A.R.V.I.S. anything..."
-        )
-
-        self.prompt.returnPressed.connect(
-            self.process_prompt
-        )
-
-        self.prompt.setStyleSheet("""
-            QLineEdit{
-                border:1px solid #0a8fa8;
-                padding:10px;
-                color:white;
-                font-size:12pt;
-                background:#08141c;
-            }
-        """)
-
-        center.addWidget(self.prompt)
-
-        body.addLayout(center, 3)
-
-        # ====================================================
-        # RIGHT COLUMN
-        # ====================================================
-
-        right = QVBoxLayout()
-        right.setSpacing(12)
-
-        self.monitor = MonitorPanel()
+        self.systems = SystemsPanel()
         self.network = NetworkPanel()
-        self.activity = ActivityPanel()
+        self.clock   = WorldClockPanel()
 
-        right.addWidget(self.monitor, 2)
-        right.addWidget(self.network, 2)
-        right.addWidget(self.activity, 3)
+        left.addWidget(self.systems, 4)
+        left.addWidget(self.network, 3)
+        left.addWidget(self.clock,   2)
 
-        body.addLayout(right, 2)
+        body.addLayout(left, 22)
 
-        # ----------------------------------------------------
-        # Bottom Log
-        # ----------------------------------------------------
+        # ── CENTER COLUMN ────────────────────────────────────
+        center = QVBoxLayout()
+        center.setSpacing(10)
 
-        self.logs = LogPanel()
+        self.reactor = ReactorWidget()
+        center.addWidget(self.reactor, 4)
 
-        root.addWidget(self.logs)
+        self.terminal = TerminalPanel()
+        center.addWidget(self.terminal, 3)
 
-        # ----------------------------------------------------
-        # Timer
-        # ----------------------------------------------------
+        # input row
+        input_row = QHBoxLayout()
+        input_row.setSpacing(8)
 
-        self.timer = QTimer(self)
-        self.timer.timeout.connect(self.refresh)
-        self.timer.start(1000)
+        prompt_arrow = QLabel(">")
+        prompt_arrow.setFixedWidth(16)
+        prompt_arrow.setStyleSheet(
+            f"color:{CYAN}; font-family:'{FONT_MONO}'; font-size:12pt;"
+            f"background:transparent; border:none;"
+        )
+        self.prompt = QLineEdit()
+        self.prompt.setPlaceholderText("TYPE YOUR COMMAND...")
+        self.prompt.returnPressed.connect(self._on_submit)
 
-        self.logs.push("J.A.R.V.I.S. initialized.")
-        self.logs.push("Systems online.")
-        self.logs.push("Awaiting operator.")
-
-        self.refresh()
-
-    # ----------------------------------------------------
-    # Refresh system panels
-    # ----------------------------------------------------
-
-    def refresh(self):
-        """
-        Updates all live system information.
-        Called once per second.
-        """
-
-        cpu = psutil.cpu_percent(interval=None)
-        ram = psutil.virtual_memory()
-
-        self.monitor.refresh(cpu, ram)
-        self.network.refresh()
-        self.vitals.refresh(cpu)
-
-    # ----------------------------------------------------
-    # Process a prompt
-    # ----------------------------------------------------
-
-    def process_prompt(self):
-
-        prompt = self.prompt.text().strip()
-
-        if not prompt:
-            return
-
-        self.prompt.clear()
-
-        # Log user message
-        self.logs.push(f"Operator: {prompt}")
-
-        # Show thinking
-        self.activity.set_html(
-            "<span style='color:#00d4ff;'>Processing...</span>"
+        enter_lbl = QLabel("PRESS ENTER TO SEND  ↵")
+        enter_lbl.setStyleSheet(
+            f"color:{CYAN_DIM}; font-family:'{FONT_MONO}'; font-size:7pt;"
+            f"background:transparent; border:none;"
         )
 
-        self.repaint()
+        input_row.addWidget(prompt_arrow)
+        input_row.addWidget(self.prompt, 1)
+        input_row.addWidget(enter_lbl)
+        center.addLayout(input_row)
 
+        body.addLayout(center, 36)
+
+        # ── RIGHT COLUMN ─────────────────────────────────────
+        right = QVBoxLayout()
+        right.setSpacing(10)
+
+        self.ai_status = AIStatusPanel()
+        self.tools     = ToolsPanel()
+        self.log       = LogPanel()
+
+        right.addWidget(self.ai_status, 4)
+        right.addWidget(self.tools,     3)
+        right.addWidget(self.log,       3)
+
+        body.addLayout(right, 22)
+
+        # ── bottom bar ───────────────────────────────────────
+        self.bottom = BottomBar()
+        root.addWidget(self.bottom)
+
+        # ── system stats timer ───────────────────────────────
+        self._net_prev_sent = psutil.net_io_counters().bytes_sent
+        self._net_prev_recv = psutil.net_io_counters().bytes_recv
+
+        self._stats_timer = QTimer(self)
+        self._stats_timer.timeout.connect(self._refresh_stats)
+        self._stats_timer.start(1000)
+        self._refresh_stats()
+
+        # ── voice listener ───────────────────────────────────
+        self._voice = VoiceListener()
+        self._voice.wake_word_detected.connect(self._on_wake_word)
+        self._voice.command_received.connect(self._on_voice_command)
+        self._voice.listening_changed.connect(self.bottom.set_listening)
+        self._voice.error.connect(lambda e: self.log.push(f"Voice error: {e}"))
+        self._voice.start()
+
+        # ── boot messages ────────────────────────────────────
+        self.terminal.push_system("J.A.R.V.I.S. initialized")
+        self.terminal.push_system("All systems online")
+        self.terminal.push_jarvis(
+            "Good evening, sir.\n"
+            "All systems are operating within normal parameters.\n"
+            "How may I assist you today?"
+        )
+
+    # ── resize background with window ────────────────────────
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._bg.setGeometry(self.rect())
+
+    # ── system stats ─────────────────────────────────────────
+    def _refresh_stats(self):
+        cpu  = psutil.cpu_percent(interval=None)
+        ram  = psutil.virtual_memory()
+        disk = psutil.disk_usage("/").percent
+
+        c    = psutil.net_io_counters()
+        up   = (c.bytes_sent - self._net_prev_sent) / 1024
+        dn   = (c.bytes_recv - self._net_prev_recv) / 1024
+        net  = up + dn
+        self._net_prev_sent = c.bytes_sent
+        self._net_prev_recv = c.bytes_recv
+
+        # temperature — Mac M-series may not expose this
+        temp = None
         try:
-
-            response = ask(prompt)
-
-        except Exception as e:
-
-            response = f"Error:\n\n{e}"
-
-        # Display response
-        html = response.replace("\n", "<br>")
-        self.activity.set_html(html)
-
-        self.logs.push("Response generated.")
-
-        # Animate Arc Reactor
-        self.arc.start_speaking_animation()
-
-        try:
-            speak(response)
+            temps = psutil.sensors_temperatures()
+            if temps:
+                for vals in temps.values():
+                    if vals:
+                        temp = vals[0].current
+                        break
         except Exception:
             pass
 
-        # crude estimate of speaking time
-        duration = max(
-            1500,
-            len(response.split()) * 350
-        )
+        self.systems.refresh(cpu, ram, disk, net, temp)
+        self.network.refresh()
 
-        QTimer.singleShot(
-            duration,
-            self.arc.stop_speaking_animation
-        )
+    # ── wake word ────────────────────────────────────────────
+    def _on_wake_word(self):
+        self.terminal.push_system("Wake word detected — listening...")
+        self.log.push("Wake word: Hey Jarvis")
+        self.reactor.start_thinking()
+
+    # ── voice command ────────────────────────────────────────
+    def _on_voice_command(self, text):
+        self.prompt.setText(text)
+        self._on_submit()
+
+    # ── text submit ──────────────────────────────────────────
+    def _on_submit(self):
+        text = self.prompt.text().strip()
+        if not text or self._ai_thread is not None:
+            return
+
+        self.prompt.clear()
+        self._msg_count += 1
+        self.ai_status.set_context(self._msg_count)
+
+        self.terminal.push_user(text)
+        self.log.push(f"Operator: {text[:40]}")
+        self.terminal.set_thinking(True)
+        self.reactor.start_thinking()
+        self.ai_status.set_status("THINKING", AMBER)
+
+        # run AI in background thread
+        self._ai_thread  = QThread()
+        self._ai_worker  = AIWorker(text)
+        self._ai_worker.moveToThread(self._ai_thread)
+        self._ai_thread.started.connect(self._ai_worker.run)
+        self._ai_worker.finished.connect(self._on_response)
+        self._ai_worker.finished.connect(self._ai_thread.quit)
+        self._ai_thread.finished.connect(self._cleanup_thread)
+        self._ai_thread.start()
+
+    # ── AI response ──────────────────────────────────────────
+    def _on_response(self, response, ms):
+        self.terminal.set_thinking(False)
+        self.terminal.push_jarvis(response)
+        self.log.push("Response generated.")
+        self.ai_status.set_latency(ms)
+        self.ai_status.set_status("ONLINE", GREEN)
+        self.reactor.start_speaking()
+
+        speak(response)
+
+        duration = max(1500, len(response.split()) * 380)
+        QTimer.singleShot(duration, self.reactor.stop_speaking)
+
+    def _cleanup_thread(self):
+        self._ai_thread = None
+        self._ai_worker = None
+
+    def closeEvent(self, event):
+        self._voice.stop()
+        event.accept()

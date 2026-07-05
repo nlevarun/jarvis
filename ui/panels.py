@@ -1,340 +1,391 @@
 import psutil
 import time
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QSizePolicy
+import socket
+from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout,
+                                QLabel, QSizePolicy, QScrollArea)
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QPainter, QColor, QPen, QFont
 
-# ── shared colors ──────────────────────────────────────────────
-CYAN   = "#00d4ff"
-DIM    = "#0a8fa8"
-BG     = "#050d12"
-BORDER = "#0f4a5c"
-WHITE  = "#cceeff"
-GREEN  = "#00ff9f"
-AMBER  = "#e8b84b"
-RED    = "#ff4455"
-
-MONO = "Menlo"
-SYS  = "Helvetica Neue"
+from ui.theme import (CYAN, CYAN_DIM, CYAN_DARK, BG, BG_PANEL, BORDER,
+                      WHITE, WHITE_DIM, GREEN, GREEN_DIM, AMBER, RED,
+                      FONT_MONO, FONT_UI, SIZE_XS, SIZE_SM, SIZE_MD)
 
 
-def bracket_style(widget):
-    """Adds corner-bracket look via stylesheet."""
-    widget.setStyleSheet(f"""
-        QWidget {{
-            background-color: {BG};
-            border: 1px solid {BORDER};
-            border-radius: 0px;
-        }}
-    """)
-
-
-# ── reusable tiny widgets ──────────────────────────────────────
-class HUDLabel(QLabel):
-    def __init__(self, text="", color=WHITE, size=9, bold=False, mono=False):
-        super().__init__(text)
-        font_family = MONO if mono else SYS
-        weight = "bold" if bold else "normal"
-        self.setStyleSheet(
-            f"color: {color}; font-family: '{font_family}'; "
-            f"font-size: {size}pt; font-weight: {weight}; "
-            f"background: transparent; border: none;"
-        )
-        self.setWordWrap(True)
+# ── helpers ───────────────────────────────────────────────────
+def _lbl(text="", color=WHITE, size=SIZE_MD, bold=False, mono=False):
+    l = QLabel(text)
+    l.setStyleSheet(
+        f"color:{color}; font-family:'{FONT_MONO if mono else FONT_UI}';"
+        f"font-size:{size}pt; font-weight:{'bold' if bold else 'normal'};"
+        f"background:transparent; border:none;"
+    )
+    l.setWordWrap(True)
+    return l
 
 
 class BarWidget(QWidget):
-    """A simple horizontal progress bar."""
     def __init__(self, color=CYAN):
         super().__init__()
-        self._value = 0.0
-        self._color = QColor(color)
-        self.setFixedHeight(6)
+        self._v = 0.0
+        self._c = QColor(color)
+        self.setFixedHeight(5)
 
     def set_value(self, v):
-        self._value = max(0.0, min(1.0, v))
+        self._v = max(0.0, min(1.0, v))
         self.update()
 
-    def paintEvent(self, event):
+    def paintEvent(self, e):
         p = QPainter(self)
         p.fillRect(self.rect(), QColor(BORDER))
-        w = int(self.width() * self._value)
+        w = int(self.width() * self._v)
         if w > 0:
-            color = self._color
-            if self._value > 0.85:
-                color = QColor(RED)
-            elif self._value > 0.65:
-                color = QColor(AMBER)
-            p.fillRect(0, 0, w, self.height(), color)
+            c = QColor(RED) if self._v > 0.85 else QColor(AMBER) if self._v > 0.65 else self._c
+            p.fillRect(0, 0, w, self.height(), c)
 
 
-class MiniBarChart(QWidget):
-    """Scrolling bar chart for CPU history."""
-    def __init__(self, bars=30, color=CYAN):
+class MiniChart(QWidget):
+    def __init__(self, bars=28, color=CYAN):
         super().__init__()
-        self._data   = [0.0] * bars
-        self._color  = QColor(color)
-        self._bars   = bars
-        self.setFixedHeight(40)
+        self._d = [0.0] * bars
+        self._c = QColor(color)
+        self._b = bars
+        self.setFixedHeight(36)
 
-    def push(self, value):
-        self._data.append(max(0.0, min(1.0, value)))
-        if len(self._data) > self._bars:
-            self._data.pop(0)
+    def push(self, v):
+        self._d.append(max(0.0, min(1.0, v)))
+        if len(self._d) > self._b:
+            self._d.pop(0)
         self.update()
 
-    def paintEvent(self, event):
+    def paintEvent(self, e):
         p = QPainter(self)
         p.fillRect(self.rect(), QColor(BG))
-        w = self.width()
-        h = self.height()
-        bar_w = max(1, w // self._bars - 1)
-        for i, v in enumerate(self._data):
-            x     = i * (bar_w + 1)
-            bh    = int(v * h)
-            alpha = int(80 + 175 * v)
-            color = QColor(self._color)
-            color.setAlpha(alpha)
-            p.fillRect(x, h - bh, bar_w, bh, color)
+        w, h  = self.width(), self.height()
+        bw    = max(1, w // self._b - 1)
+        for i, v in enumerate(self._d):
+            x  = i * (bw + 1)
+            bh = int(v * h)
+            c  = QColor(self._c)
+            c.setAlpha(int(80 + 175 * v))
+            p.fillRect(x, h - bh, bw, bh, c)
 
 
-# ══════════════════════════════════════════════════════════════
-# PANEL BASE
-# ══════════════════════════════════════════════════════════════
-class BasePanel(QWidget):
+# ── base panel ────────────────────────────────────────────────
+class Panel(QWidget):
     def __init__(self, title="", tag="", parent=None):
         super().__init__(parent)
-        bracket_style(self)
+        self.setStyleSheet(f"""
+            QWidget {{
+                background-color:{BG_PANEL};
+                border:1px solid {BORDER};
+            }}
+        """)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(10, 6, 10, 10)
-        root.setSpacing(6)
+        root.setSpacing(5)
 
-        # header row
-        header = QHBoxLayout()
-        header.setSpacing(0)
-        lbl_sys = HUDLabel("SYSTEM //", color=DIM, size=8, mono=True)
-        lbl_title = HUDLabel(title, color=CYAN, size=8, bold=True, mono=True)
-        lbl_tag = HUDLabel(tag, color=DIM, size=8, mono=True)
-        header.addWidget(lbl_sys)
-        header.addWidget(lbl_title)
-        header.addStretch()
-        header.addWidget(lbl_tag)
-        root.addLayout(header)
+        # header
+        hdr = QHBoxLayout()
+        hdr.setSpacing(4)
+        hdr.addWidget(_lbl("SYSTEM //", CYAN_DIM, SIZE_XS, mono=True))
+        hdr.addWidget(_lbl(title, CYAN, SIZE_XS, bold=True, mono=True))
+        hdr.addStretch()
+        if tag:
+            hdr.addWidget(_lbl(tag, CYAN_DIM, SIZE_XS, mono=True))
+        root.addLayout(hdr)
 
-        # divider
         div = QWidget()
         div.setFixedHeight(1)
-        div.setStyleSheet(f"background: {BORDER}; border: none;")
+        div.setStyleSheet(f"background:{BORDER}; border:none;")
         root.addWidget(div)
 
-        self.content_layout = root
+        self.body = root
 
-    def add(self, widget):
-        self.content_layout.addWidget(widget)
+    def add(self, w):    self.body.addWidget(w)
+    def addL(self, l):   self.body.addLayout(l)
+    def addS(self):      self.body.addStretch()
 
-    def add_layout(self, layout):
-        self.content_layout.addLayout(layout)
-
-    def add_stretch(self):
-        self.content_layout.addStretch()
+    def _row(self, label, value, lc=CYAN_DIM, vc=WHITE):
+        r = QHBoxLayout()
+        r.addWidget(_lbl(label, lc, SIZE_SM, mono=True))
+        r.addStretch()
+        r.addWidget(_lbl(value, vc, SIZE_SM, bold=True, mono=True))
+        self.addL(r)
+        return r
 
 
 # ══════════════════════════════════════════════════════════════
-# VITAL SIGNS PANEL  (CPU history chart)
+# SYSTEMS OVERVIEW  (CPU, RAM, Disk, Network, Temp)
 # ══════════════════════════════════════════════════════════════
-class VitalSignsPanel(BasePanel):
+class SystemsPanel(Panel):
     def __init__(self):
-        super().__init__(title="VITALS", tag="VITAL SIGNS")
+        super().__init__("SYSTEMS", "OVERVIEW")
+        self._rows = {}
 
-        self.cpu_chart = MiniBarChart(bars=30, color=CYAN)
-        self.add(self.cpu_chart)
+        specs = [
+            ("CPU",   CYAN,  "0%"),
+            ("MEMORY", AMBER, "-- GB"),
+            ("DISK",  CYAN,  "0%"),
+            ("NETWORK", GREEN, "-- KB/s"),
+            ("TEMP",  CYAN,  "-- °C"),
+        ]
+        for name, color, default in specs:
+            row = QHBoxLayout()
+            icon_map = {
+                "CPU": "⬡", "MEMORY": "⬡",
+                "DISK": "⬡", "NETWORK": "⬡", "TEMP": "⬡"
+            }
+            icon = _lbl(icon_map[name], color, SIZE_SM, mono=True)
+            icon.setFixedWidth(16)
+            lbl  = _lbl(name, WHITE_DIM, SIZE_SM, mono=True)
+            lbl.setFixedWidth(70)
+            val  = _lbl(default, WHITE, SIZE_SM, bold=True, mono=True)
+            val.setFixedWidth(70)
+            val.setAlignment(Qt.AlignRight)
+            row.addWidget(icon)
+            row.addWidget(lbl)
+            row.addStretch()
+            row.addWidget(val)
+            self.addL(row)
 
-        row = QHBoxLayout()
-        self.lbl_heart = HUDLabel("Heart Rate", color=DIM, size=8)
-        self.lbl_bpm   = HUDLabel("-- BPM", color=WHITE, size=18, bold=True)
-        row.addWidget(self.lbl_heart)
-        row.addStretch()
-        row.addWidget(self.lbl_bpm)
-        self.add_layout(row)
-        self.add_stretch()
+            bar = BarWidget(color)
+            self.add(bar)
+            self._rows[name] = (val, bar)
 
-        # fake-ish heart rate derived from CPU
-        self._base_bpm = 62
+        self.addS()
 
-    def refresh(self, cpu_pct):
-        self.cpu_chart.push(cpu_pct / 100.0)
-        bpm = int(self._base_bpm + cpu_pct * 0.4)
-        self.lbl_bpm.setText(f"{bpm} BPM")
+    def refresh(self, cpu, ram, disk, net_kb, temp):
+        v, b = self._rows["CPU"]
+        v.setText(f"{cpu:.0f}%")
+        b.set_value(cpu / 100)
 
+        v, b = self._rows["MEMORY"]
+        used = (ram.total - ram.available) / 1e9
+        tot  = ram.total / 1e9
+        v.setText(f"{used:.1f}/{tot:.0f}G")
+        b.set_value(ram.percent / 100)
 
-# ══════════════════════════════════════════════════════════════
-# RT-MONITOR PANEL  (CPU + RAM)
-# ══════════════════════════════════════════════════════════════
-class MonitorPanel(BasePanel):
-    def __init__(self):
-        super().__init__(title="MONITOR", tag="RT-MONITOR")
+        v, b = self._rows["DISK"]
+        v.setText(f"{disk:.0f}%")
+        b.set_value(disk / 100)
 
-        # CPU
-        cpu_row = QHBoxLayout()
-        self.lbl_cpu = HUDLabel("CPU Load", color=DIM, size=9)
-        self.val_cpu = HUDLabel("0%", color=WHITE, size=9, mono=True)
-        cpu_row.addWidget(self.lbl_cpu)
-        cpu_row.addStretch()
-        cpu_row.addWidget(self.val_cpu)
-        self.add_layout(cpu_row)
-        self.bar_cpu = BarWidget(CYAN)
-        self.add(self.bar_cpu)
+        v, b = self._rows["NETWORK"]
+        v.setText(f"{net_kb:.0f}KB/s")
+        b.set_value(min(net_kb / 5000, 1.0))
 
-        # RAM
-        ram_row = QHBoxLayout()
-        self.lbl_ram = HUDLabel("Memory", color=DIM, size=9)
-        self.val_ram = HUDLabel("-- GB", color=WHITE, size=9, mono=True)
-        ram_row.addWidget(self.lbl_ram)
-        ram_row.addStretch()
-        ram_row.addWidget(self.val_ram)
-        self.add_layout(ram_row)
-        self.bar_ram = BarWidget(CYAN)
-        self.add(self.bar_ram)
-
-        # GPU placeholder
-        gpu_row = QHBoxLayout()
-        self.lbl_gpu = HUDLabel("GPU Temp", color=DIM, size=9)
-        self.val_gpu = HUDLabel("N/A", color=WHITE, size=9, mono=True)
-        gpu_row.addWidget(self.lbl_gpu)
-        gpu_row.addStretch()
-        gpu_row.addWidget(self.val_gpu)
-        self.add_layout(gpu_row)
-        self.add_stretch()
-
-    def refresh(self, cpu_pct, ram):
-        self.val_cpu.setText(f"{cpu_pct:.0f}%")
-        self.bar_cpu.set_value(cpu_pct / 100.0)
-        used_gb = (ram.total - ram.available) / 1e9
-        total_gb = ram.total / 1e9
-        self.val_ram.setText(f"{used_gb:.1f} / {total_gb:.0f} GB")
-        self.bar_ram.set_value(ram.percent / 100.0)
+        v, b = self._rows["TEMP"]
+        if temp is not None:
+            v.setText(f"{temp:.0f}°C")
+            b.set_value(min(temp / 100, 1.0))
+        else:
+            v.setText("N/A")
 
 
 # ══════════════════════════════════════════════════════════════
 # NETWORK PANEL
 # ══════════════════════════════════════════════════════════════
-class NetworkPanel(BasePanel):
+class NetworkPanel(Panel):
     def __init__(self):
-        super().__init__(title="NETWORK", tag="UP-LINK")
+        super().__init__("NETWORK", "REAL-TIME")
         self._prev_sent = psutil.net_io_counters().bytes_sent
         self._prev_recv = psutil.net_io_counters().bytes_recv
 
-        row_up = QHBoxLayout()
-        self.lbl_up = HUDLabel("Upload", color=DIM, size=9)
-        self.val_up = HUDLabel("-- KB/s", color=GREEN, size=9, mono=True)
-        row_up.addWidget(self.lbl_up)
-        row_up.addStretch()
-        row_up.addWidget(self.val_up)
-        self.add_layout(row_up)
-        self.bar_up = BarWidget(GREEN)
-        self.add(self.bar_up)
+        self._up_chart = MiniChart(color=GREEN)
+        self._dn_chart = MiniChart(color=CYAN)
 
-        row_dn = QHBoxLayout()
-        self.lbl_dn = HUDLabel("Download", color=DIM, size=9)
-        self.val_dn = HUDLabel("-- KB/s", color=CYAN, size=9, mono=True)
-        row_dn.addWidget(self.lbl_dn)
-        row_dn.addStretch()
-        row_dn.addWidget(self.val_dn)
-        self.add_layout(row_dn)
-        self.bar_dn = BarWidget(CYAN)
-        self.add(self.bar_dn)
+        up_r = QHBoxLayout()
+        self._up_icon = _lbl("▲", GREEN, SIZE_SM, mono=True)
+        self._up_val  = _lbl("-- KB/s", GREEN, SIZE_SM, bold=True, mono=True)
+        up_r.addWidget(_lbl("UPLOAD", CYAN_DIM, SIZE_SM, mono=True))
+        up_r.addWidget(self._up_icon)
+        up_r.addStretch()
+        up_r.addWidget(self._up_val)
+        self.addL(up_r)
+        self.add(self._up_chart)
 
-        status_row = QHBoxLayout()
-        self.lbl_status = HUDLabel("Status", color=DIM, size=9)
-        self.val_status = HUDLabel("SIGNAL ENCRYPTED", color=GREEN, size=9, mono=True)
-        status_row.addWidget(self.lbl_status)
-        status_row.addStretch()
-        status_row.addWidget(self.val_status)
-        self.add_layout(status_row)
-        self.add_stretch()
+        dn_r = QHBoxLayout()
+        self._dn_icon = _lbl("▼", CYAN, SIZE_SM, mono=True)
+        self._dn_val  = _lbl("-- KB/s", CYAN, SIZE_SM, bold=True, mono=True)
+        dn_r.addWidget(_lbl("DOWNLOAD", CYAN_DIM, SIZE_SM, mono=True))
+        dn_r.addWidget(self._dn_icon)
+        dn_r.addStretch()
+        dn_r.addWidget(self._dn_val)
+        self.addL(dn_r)
+        self.add(self._dn_chart)
+
+        # IP
+        try:
+            ip = socket.gethostbyname(socket.gethostname())
+        except Exception:
+            ip = "127.0.0.1"
+
+        status_r = QHBoxLayout()
+        status_r.addWidget(_lbl("STATUS", CYAN_DIM, SIZE_SM, mono=True))
+        status_r.addStretch()
+        status_r.addWidget(_lbl("CONNECTED", GREEN, SIZE_SM, bold=True, mono=True))
+        self.addL(status_r)
+
+        ip_r = QHBoxLayout()
+        ip_r.addWidget(_lbl("IP ADDRESS", CYAN_DIM, SIZE_SM, mono=True))
+        ip_r.addStretch()
+        ip_r.addWidget(_lbl(ip, WHITE, SIZE_SM, mono=True))
+        self.addL(ip_r)
+        self.addS()
 
     def refresh(self):
-        counters = psutil.net_io_counters()
-        up_kb = (counters.bytes_sent - self._prev_sent) / 1024
-        dn_kb = (counters.bytes_recv - self._prev_recv) / 1024
-        self._prev_sent = counters.bytes_sent
-        self._prev_recv = counters.bytes_recv
-
-        self.val_up.setText(f"{up_kb:.0f} KB/s")
-        self.val_dn.setText(f"{dn_kb:.0f} KB/s")
-        self.bar_up.set_value(min(up_kb / 1000, 1.0))
-        self.bar_dn.set_value(min(dn_kb / 5000, 1.0))
+        c    = psutil.net_io_counters()
+        up   = (c.bytes_sent - self._prev_sent) / 1024
+        dn   = (c.bytes_recv - self._prev_recv) / 1024
+        self._prev_sent = c.bytes_sent
+        self._prev_recv = c.bytes_recv
+        self._up_val.setText(f"{up:.0f} KB/s")
+        self._dn_val.setText(f"{dn:.0f} KB/s")
+        self._up_chart.push(min(up / 1000, 1.0))
+        self._dn_chart.push(min(dn / 5000, 1.0))
 
 
 # ══════════════════════════════════════════════════════════════
-# SYSTEM LOG PANEL
+# WORLD CLOCK
 # ══════════════════════════════════════════════════════════════
-class LogPanel(BasePanel):
+class WorldClockPanel(Panel):
     def __init__(self):
-        super().__init__(title="LOG", tag="RT-LOG")
-        self._entries = []
-        self.lbl_log  = HUDLabel("", color=DIM, size=8, mono=True)
-        self.lbl_log.setAlignment(Qt.AlignTop)
-        self.add(self.lbl_log)
-        self.add_stretch()
+        super().__init__("WORLD CLOCK", "")
+        from datetime import datetime, timezone, timedelta
 
+        self._cities = [
+            ("SAN FRANCISCO", -7),
+            ("LONDON",         1),
+            ("TOKYO",          9),
+        ]
+        self._time_labels = []
+        self._date_labels = []
+
+        row = QHBoxLayout()
+        row.setSpacing(0)
+        for city, offset in self._cities:
+            col = QVBoxLayout()
+            col.setSpacing(2)
+            col.setAlignment(Qt.AlignHCenter)
+            city_lbl = _lbl(city, CYAN_DIM, SIZE_XS, mono=True)
+            city_lbl.setAlignment(Qt.AlignCenter)
+            time_lbl = _lbl("--:--", WHITE, 14, bold=True, mono=True)
+            time_lbl.setAlignment(Qt.AlignCenter)
+            date_lbl = _lbl("---", CYAN_DIM, SIZE_XS, mono=True)
+            date_lbl.setAlignment(Qt.AlignCenter)
+            col.addWidget(city_lbl)
+            col.addWidget(time_lbl)
+            col.addWidget(date_lbl)
+            row.addLayout(col)
+            if city != self._cities[-1][0]:
+                row.addStretch()
+            self._time_labels.append((time_lbl, date_lbl, offset))
+
+        self.addL(row)
+        self.addS()
+
+        t = QTimer(self)
+        t.timeout.connect(self._tick)
+        t.start(1000)
+        self._tick()
+
+    def _tick(self):
+        from datetime import datetime, timezone, timedelta
+        for time_lbl, date_lbl, offset in self._time_labels:
+            dt = datetime.now(timezone.utc) + timedelta(hours=offset)
+            time_lbl.setText(dt.strftime("%H:%M"))
+            date_lbl.setText(dt.strftime("%b %d").upper())
+
+
+# ══════════════════════════════════════════════════════════════
+# AI STATUS
+# ══════════════════════════════════════════════════════════════
+class AIStatusPanel(Panel):
+    def __init__(self):
+        super().__init__("AI STATUS", "ASSISTANT")
+
+        specs = [
+            ("MODEL",   "llama3.2",  WHITE),
+            ("STATUS",  "ONLINE",    GREEN),
+            ("LATENCY", "-- ms",     CYAN),
+            ("CONTEXT", "0 msgs",    WHITE),
+            ("VOICE",   "DANIEL",    CYAN),
+            ("MODE",    "STANDARD",  WHITE),
+        ]
+        self._vals = {}
+        for key, default, color in specs:
+            r = QHBoxLayout()
+            r.addWidget(_lbl(key, CYAN_DIM, SIZE_SM, mono=True))
+            r.addStretch()
+            v = _lbl(default, color, SIZE_SM, bold=True, mono=True)
+            r.addWidget(v)
+            self.addL(r)
+            self._vals[key] = v
+
+        self.addS()
+
+    def set_latency(self, ms):
+        self._vals["LATENCY"].setText(f"{ms} ms")
+
+    def set_context(self, n):
+        self._vals["CONTEXT"].setText(f"{n} msgs")
+
+    def set_status(self, s, color=GREEN):
+        self._vals["STATUS"].setText(s)
+        self._vals["STATUS"].setStyleSheet(
+            f"color:{color}; font-family:'{FONT_MONO}'; font-size:{SIZE_SM}pt;"
+            f"font-weight:bold; background:transparent; border:none;"
+        )
+
+
+# ══════════════════════════════════════════════════════════════
+# TOOLS / MODULES
+# ══════════════════════════════════════════════════════════════
+class ToolsPanel(Panel):
+    def __init__(self):
+        super().__init__("TOOLS", "MODULES")
+
+        tools = [
+            "VOICE RECOGNITION",
+            "TEXT TO SPEECH",
+            "INTERNET ACCESS",
+            "FILE SYSTEM",
+            "COMMAND MODULE",
+        ]
+        for tool in tools:
+            r = QHBoxLayout()
+            dot = _lbl("⊙", CYAN_DIM, SIZE_SM, mono=True)
+            dot.setFixedWidth(16)
+            r.addWidget(dot)
+            r.addWidget(_lbl(tool, WHITE_DIM, SIZE_SM, mono=True))
+            r.addStretch()
+            r.addWidget(_lbl("● ONLINE", GREEN, SIZE_SM, bold=True, mono=True))
+            self.addL(r)
+
+        self.addS()
+
+
+# ══════════════════════════════════════════════════════════════
+# SYSTEM LOG
+# ══════════════════════════════════════════════════════════════
+class LogPanel(Panel):
+    def __init__(self):
+        super().__init__("LOG", "RT-LOG")
+        self._entries = []
+        self._lbl = _lbl("", CYAN_DIM, SIZE_SM, mono=True)
+        self._lbl.setAlignment(Qt.AlignTop)
+        self.add(self._lbl)
+        self.addS()
         self.push("System integrity check complete")
         self.push("All subsystems nominal")
         self.push("Awaiting operator input")
 
-    def push(self, message: str, color=None):
-        ts = time.strftime("%H:%M:%S")
-        c  = color or DIM
-        entry = f'<span style="color:{CYAN};">[{ts}]</span> ' \
-                f'<span style="color:{WHITE};">{message}</span>'
+    def push(self, msg, color=None):
+        ts    = time.strftime("%H:%M:%S")
+        entry = (f'<span style="color:{CYAN};">[{ts}]</span> '
+                 f'<span style="color:{WHITE};">{msg}</span>')
         self._entries.append(entry)
-        if len(self._entries) > 6:
+        if len(self._entries) > 8:
             self._entries.pop(0)
-        self.lbl_log.setText("<br>".join(self._entries))
-
-
-# ══════════════════════════════════════════════════════════════
-# IRON MAN SUIT PANEL
-# ══════════════════════════════════════════════════════════════
-class SuitPanel(BasePanel):
-    def __init__(self):
-        super().__init__(title="MARK LXXXV", tag="SUIT STATUS")
-
-        for label, value, color in [
-            ("Power Core",       "98%",  GREEN),
-            ("Structural",       "100%", GREEN),
-            ("Repulsors",        "READY", CYAN),
-            ("Defense Systems",  "ACTIVE", CYAN),
-        ]:
-            row = QHBoxLayout()
-            lbl = HUDLabel(label, color=DIM, size=9)
-            val = HUDLabel(value, color=color, size=9, bold=True, mono=True)
-            row.addWidget(lbl)
-            row.addStretch()
-            row.addWidget(val)
-            self.add_layout(row)
-            bar = BarWidget(color)
-            bar.set_value(1.0)
-            self.add(bar)
-
-        self.add_stretch()
-
-
-# ══════════════════════════════════════════════════════════════
-# ACTIVITY PANEL  (search results / code output)
-# ══════════════════════════════════════════════════════════════
-class ActivityPanel(BasePanel):
-    def __init__(self):
-        super().__init__(title="ACTIVITY", tag="ROOT@JARVIS")
-        self.lbl = HUDLabel("", color=DIM, size=8, mono=True)
-        self.lbl.setAlignment(Qt.AlignTop)
-        self.add(self.lbl)
-        self.add_stretch()
-
-    def set_html(self, html: str):
-        self.lbl.setText(html)
-
-    def clear(self):
-        self.lbl.setText("")
+        self._lbl.setText("<br>".join(self._entries))

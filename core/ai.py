@@ -1,83 +1,88 @@
 import os
-from openai import OpenAI
+import json
+from groq import Groq
 from dotenv import load_dotenv
+from duckduckgo_search import DDGS
 
 load_dotenv()
 
-# Connect to Ollama
-client = OpenAI(
-    base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1"),
-    api_key=os.getenv("OLLAMA_API_KEY", "ollama"),  # Ollama ignores this, but the SDK requires it
-)
-
-MODEL = os.getenv("OLLAMA_MODEL", "llama3.1:8b")
+client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+MODEL  = "openai/gpt-oss-120b"
 
 SYSTEM_PROMPT = """
-You are J.A.R.V.I.S., Tony Stark's AI assistant.
-
-Your personality:
-- Calm
-- Intelligent
-- Slightly witty
-- Professional
-- Brief unless more detail is requested
-- Never use emojis.
-- Speak naturally like an advanced AI assistant.
-
-Always address the user naturally.
+You are J.A.R.V.I.S. — Just A Rather Very Intelligent System.
+You are Tony Stark's personal AI assistant. You are witty, precise,
+and speak with dry British intelligence. Keep responses concise and sharp.
+Never ramble. Occasionally address the user as 'sir' but not every time.
+Never use emojis. Never use markdown formatting like ** or ##.
+Speak in plain sentences as if you are talking, not writing.
+When you are given search results, use them to answer the question accurately
+and concisely. Cite the key facts naturally in your response.
 """
 
-history = [
-    {
-        "role": "system",
-        "content": SYSTEM_PROMPT,
-    }
+SEARCH_TRIGGERS = [
+    "today", "tomorrow", "tonight", "this week", "right now",
+    "current", "currently", "latest", "recent", "news",
+    "score", "scores", "weather", "price", "stock",
+    "who won", "what happened", "when is", "where is",
+    "world cup", "nba", "nfl", "nhl", "mlb", "premier league",
+    "match", "game", "fixture", "standings", "results",
 ]
+
+history = [{"role": "system", "content": SYSTEM_PROMPT}]
+
+
+def _should_search(prompt: str) -> bool:
+    lower = prompt.lower()
+    return any(trigger in lower for trigger in SEARCH_TRIGGERS)
+
+
+def _web_search(query: str) -> str:
+    try:
+        print(f"[Search] {query}")
+        with DDGS() as ddgs:
+            results = list(ddgs.text(query, max_results=5))
+        if not results:
+            return "No results found."
+        return "\n\n".join(
+            f"{r['title']}: {r['body']}" for r in results
+        )
+    except Exception as e:
+        return f"Search failed: {e}"
 
 
 def ask(prompt: str) -> str:
-    """
-    Sends a prompt to Ollama and returns the response.
-    """
+    messages = list(history)
 
-    history.append(
-        {
-            "role": "user",
-            "content": prompt,
-        }
-    )
+    # auto search if needed
+    if _should_search(prompt):
+        search_results = _web_search(prompt)
+        augmented = (
+            f"{prompt}\n\n"
+            f"[Search Results]\n{search_results}\n\n"
+            f"Use the above search results to answer accurately."
+        )
+        messages.append({"role": "user", "content": augmented})
+    else:
+        messages.append({"role": "user", "content": prompt})
 
     try:
         response = client.chat.completions.create(
             model=MODEL,
-            messages=history,
+            messages=messages,
             temperature=0.7,
+            max_tokens=400,
         )
-
         answer = response.choices[0].message.content.strip()
-
     except Exception as e:
-        answer = f"I'm sorry, sir. I encountered an error.\n\n{e}"
+        answer = f"I'm sorry, sir. I encountered an error. {e}"
 
-    history.append(
-        {
-            "role": "assistant",
-            "content": answer,
-        }
-    )
-
+    # add to real history without search results bloating it
+    history.append({"role": "user", "content": prompt})
+    history.append({"role": "assistant", "content": answer})
     return answer
 
 
 def reset_history():
-    """
-    Clears conversation while preserving the system prompt.
-    """
     global history
-
-    history = [
-        {
-            "role": "system",
-            "content": SYSTEM_PROMPT,
-        }
-    ]
+    history = [{"role": "system", "content": SYSTEM_PROMPT}]
