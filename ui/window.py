@@ -14,26 +14,26 @@ from ui.terminal import TerminalPanel
 from ui.panels import (SystemsPanel, NetworkPanel, WorldClockPanel,
                        AIStatusPanel, ToolsPanel, LogPanel)
 from ui.widgets import TopBar
-from core.ai import ask
+from core.ai import ask_with_summary
 from core.tts import speak
 from core.voice import VoiceListener
 
 
 # ══════════════════════════════════════════════════════════════
-# AI WORKER  — runs ask() in background thread so UI never freezes
+# AI WORKER
 # ══════════════════════════════════════════════════════════════
 class AIWorker(QObject):
-    finished = Signal(str, int)  # response, latency_ms
+    finished = Signal(str, str, int)  # spoken, full, latency_ms
 
     def __init__(self, prompt):
         super().__init__()
         self._prompt = prompt
 
     def run(self):
-        t0       = time.time()
-        response = ask(self._prompt)
-        ms       = int((time.time() - t0) * 1000)
-        self.finished.emit(response, ms)
+        t0             = time.time()
+        spoken, full   = ask_with_summary(self._prompt)
+        ms             = int((time.time() - t0) * 1000)
+        self.finished.emit(spoken, full, ms)
 
 
 # ══════════════════════════════════════════════════════════════
@@ -107,6 +107,7 @@ class MainWindow(QMainWindow):
             f"color:{CYAN}; font-family:'{FONT_MONO}'; font-size:12pt;"
             f"background:transparent; border:none;"
         )
+
         self.prompt = QLineEdit()
         self.prompt.setPlaceholderText("TYPE YOUR COMMAND...")
         self.prompt.returnPressed.connect(self._on_submit)
@@ -156,6 +157,8 @@ class MainWindow(QMainWindow):
         self._voice.wake_word_detected.connect(self._on_wake_word)
         self._voice.command_received.connect(self._on_voice_command)
         self._voice.listening_changed.connect(self.bottom.set_listening)
+        self._voice.session_started.connect(self._on_session_start)
+        self._voice.session_ended.connect(self._on_session_end)
         self._voice.error.connect(lambda e: self.log.push(f"Voice error: {e}"))
         self._voice.start()
 
@@ -168,7 +171,7 @@ class MainWindow(QMainWindow):
             "How may I assist you today?"
         )
 
-    # ── resize background with window ────────────────────────
+    # ── resize ───────────────────────────────────────────────
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._bg.setGeometry(self.rect())
@@ -186,7 +189,6 @@ class MainWindow(QMainWindow):
         self._net_prev_sent = c.bytes_sent
         self._net_prev_recv = c.bytes_recv
 
-        # temperature — Mac M-series may not expose this
         temp = None
         try:
             temps = psutil.sensors_temperatures()
@@ -212,6 +214,25 @@ class MainWindow(QMainWindow):
         self.prompt.setText(text)
         self._on_submit()
 
+    # ── session start/end ────────────────────────────────────
+    def _on_session_start(self):
+        self.terminal.push_system("Session active — listening continuously")
+        self.log.push("Voice session opened")
+        self.bottom.mic_label.setText("● SESSION ACTIVE")
+        self.bottom.mic_label.setStyleSheet(
+            "color:#00ff9f; font-family:'Menlo'; font-size:8pt;"
+            "background:transparent; border:none;"
+        )
+
+    def _on_session_end(self):
+        self.terminal.push_system("Session closed — say Hey Jarvis to reactivate")
+        self.log.push("Voice session closed")
+        self.bottom.mic_label.setText("○ AWAITING WAKE WORD")
+        self.bottom.mic_label.setStyleSheet(
+            f"color:{CYAN_DIM}; font-family:'Menlo'; font-size:8pt;"
+            "background:transparent; border:none;"
+        )
+
     # ── text submit ──────────────────────────────────────────
     def _on_submit(self):
         text = self.prompt.text().strip()
@@ -228,9 +249,8 @@ class MainWindow(QMainWindow):
         self.reactor.start_thinking()
         self.ai_status.set_status("THINKING", AMBER)
 
-        # run AI in background thread
-        self._ai_thread  = QThread()
-        self._ai_worker  = AIWorker(text)
+        self._ai_thread = QThread()
+        self._ai_worker = AIWorker(text)
         self._ai_worker.moveToThread(self._ai_thread)
         self._ai_thread.started.connect(self._ai_worker.run)
         self._ai_worker.finished.connect(self._on_response)
@@ -239,19 +259,20 @@ class MainWindow(QMainWindow):
         self._ai_thread.start()
 
     # ── AI response ──────────────────────────────────────────
-    def _on_response(self, response, ms):
+    def _on_response(self, spoken, full, ms):
         self.terminal.set_thinking(False)
-        self.terminal.push_jarvis(response)
+        self.terminal.push_jarvis(full)
         self.log.push("Response generated.")
         self.ai_status.set_latency(ms)
         self.ai_status.set_status("ONLINE", GREEN)
         self.reactor.start_speaking()
 
-        speak(response)
+        speak(spoken)
 
-        duration = max(1500, len(response.split()) * 380)
+        duration = max(1500, len(spoken.split()) * 400)
         QTimer.singleShot(duration, self.reactor.stop_speaking)
 
+    # ── cleanup ──────────────────────────────────────────────
     def _cleanup_thread(self):
         self._ai_thread = None
         self._ai_worker = None
