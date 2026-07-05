@@ -28,40 +28,40 @@ A Python-based conversational AI assistant that embodies Tony Stark's personal A
 ## Installation
 
 1. Clone the repository:
-\```bash
+```bash
 git clone https://github.com/nlevarun/jarvis
 cd jarvis
-\```
+```
 
 2. Create and activate a virtual environment:
-\```bash
+```bash
 python3 -m venv venv
 source venv/bin/activate
-\```
+```
 
 3. Install dependencies:
-\```bash
+```bash
 pip install -r requirements.txt
-\```
+```
 
 4. Set up your `.env` file in the root directory:
-\```env
+```env
 GROQ_API_KEY=your_groq_api_key
 TAVILY_API_KEY=your_tavily_api_key
 ELEVEN_LABS_API_KEY=your_elevenlabs_api_key
-\```
+```
 
 ---
 
 ## Usage
 
 Run the full HUD interface:
-\```bash
+```bash
 python3 main.py
-\```
+```
 
 Or interact via Python directly:
-\```python
+```python
 from core.ai import ask, ask_with_summary, reset_history
 
 # General conversation
@@ -75,7 +75,7 @@ print("Full:", full)
 
 # Reset conversation memory
 reset_history()
-\```
+```
 
 ---
 
@@ -92,7 +92,7 @@ reset_history()
 
 ## Project Structure
 
-\```
+```
 jarvis/
 ├── core/
 │   ├── ai.py          # Groq LLM, tool calling, Tavily search
@@ -111,7 +111,7 @@ jarvis/
 ├── .env               # API keys (never commit this)
 ├── .gitignore
 └── requirements.txt
-\```
+```
 
 ---
 
