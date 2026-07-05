@@ -57,4 +57,4 @@ def stop():
     with _lock:
         if _current_process and _current_process.poll() is None:
             _current_process.terminate()
-            _current_process = None
+            _current_process = None 
