@@ -1,7 +1,7 @@
 import os
 import threading
-import subprocess
 import tempfile
+import subprocess
 from elevenlabs import ElevenLabs
 from dotenv import load_dotenv
 
@@ -22,38 +22,28 @@ def speak(text: str, voice_id: str = VOICE_ID):
     def _run():
         global _current_process
         try:
-            print("[TTS] Streaming...")
+            print("[TTS] Generating...")
             audio_stream = client.text_to_speech.convert(
                 text=text,
                 voice_id=voice_id,
                 model_id=MODEL_ID,
                 output_format="mp3_44100_128",
             )
+            chunks = b"".join(audio_stream)
+            print(f"[TTS] Playing {len(chunks)} bytes...")
 
-            # pipe directly to afplay so it plays as it arrives
+            with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
+                f.write(chunks)
+                tmp_path = f.name
+
             with _lock:
                 _current_process = subprocess.Popen(
-                    ["afplay", "-"],
-                    stdin=subprocess.PIPE,
+                    ["afplay", tmp_path],
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL
                 )
-
-            for chunk in audio_stream:
-                if _current_process.poll() is not None:
-                    break
-                if chunk:
-                    try:
-                        _current_process.stdin.write(chunk)
-                        _current_process.stdin.flush()
-                    except BrokenPipeError:
-                        break
-
-            try:
-                _current_process.stdin.close()
-            except Exception:
-                pass
             _current_process.wait()
+            os.unlink(tmp_path)
             print("[TTS] Done.")
 
         except Exception as e:
